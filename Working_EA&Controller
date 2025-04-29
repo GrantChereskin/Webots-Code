@@ -1,0 +1,287 @@
+from controller import Supervisor, Motor, DistanceSensor
+import numpy as np
+import random
+
+#-getting robot's fields to manipulate later:
+
+robot = Supervisor()
+
+Jetson_Bot = robot.getFromDef('Jetson_Bot')
+Jetson_Bot_Translation = Jetson_Bot.getField('translation')
+Jetson_Bot_Rotation = Jetson_Bot.getField('rotation')
+
+BJEndPointNode = robot.getFromDef('BJEndPoint')
+BJTranslation = BJEndPointNode.getField('translation')
+
+Wheel1EndPointNode = robot.getFromDef('Wheel1EndPointNode')
+Wheel1Translation = Wheel1EndPointNode.getField('translation')
+Wheel1Rotation = Wheel1EndPointNode.getField('rotation')
+
+Wheel2EndPointNode = robot.getFromDef('Wheel2EndPointNode')
+Wheel2Translation = Wheel2EndPointNode.getField('translation')
+Wheel2Rotation = Wheel2EndPointNode.getField('rotation')
+
+#-Important variables:
+
+timestep = 50 #-controller tick speed
+simEvaluationSteps = 200 #-each individual's lifetime duration (# of simulation steps)
+geneticVariation = 0.01 #-"mutation" +- value
+genPop = 400 #-number of individuals per generation
+breeders = 3 #-number of best performing individuals to use for repopulation
+initialRange = 0.01 #-range in which weights are randomly initialized
+speedMultiplier = 5 #-mutliplies RNN outputs
+
+input_size = 8 #-input neurons quantity
+hidden_size = 4 #-hidden layer neurons quantity
+output_size = 2 #-output layer neurons quantity
+
+#-other variables:
+
+distanceTraveled = 0
+spawnCoords = np.array(Jetson_Bot_Translation.getSFVec3f())
+explorationValue = 0
+individual = 0
+generation = 1
+stepCount = 0
+deaths = 0
+pauseSteps = 6 #-number of sim steps taken of no robot movement before and after individual evaluation
+
+#-initializing arrays:
+
+labledPopFitness = np.zeros((genPop, 2))
+for i in range(genPop):
+labledPopFitness[i, 0] = i
+
+wheels = []
+wheelsNames = ['Wheel1_Motor', 'Wheel2_Motor']
+for name in wheelsNames:
+wheels.append(robot.getDevice(name))
+
+ds = []
+dsNames = ['DS_Front_Center', 'DS_Front_Left', 'DS_Front_Right', 'DS_Front_Left_Corner', 'DS_Front_Right_Corner', 'DS_Back_Center', 'DS_Back_Left', 'DS_Back_Right']
+for name in dsNames:
+ds.append(robot.getDevice(name))
+robot.getDevice(name).enable(timestep)
+
+inputs = []
+for i in range(input_size):
+inputs.append(0)
+
+#-allow the wheels' to spin freely & set initial velocity to 0:
+wheels[0].setPosition(float('inf'))
+wheels[1].setPosition(float('inf'))
+wheels[0].setVelocity(0)
+wheels[1].setVelocity(0)
+
+#-initialize gen 1 individuals' real-value weights:
+
+popWxh = []
+for a in range(input_size * hidden_size * genPop):
+popWxh.append(random.uniform(-initialRange, initialRange))
+popWxhMatrix = np.array(popWxh).reshape(input_size * hidden_size, genPop)
+
+popWhh = []
+for a in range(hidden_size * hidden_size * genPop):
+popWhh.append(random.uniform(-initialRange, initialRange))
+popWhhMatrix = np.array(popWhh).reshape(hidden_size * hidden_size, genPop)
+
+popWhy = []
+for a in range(hidden_size * output_size * genPop):
+popWhy.append(random.uniform(-initialRange, initialRange))
+popWhyMatrix = np.array(popWhy).reshape(hidden_size * output_size, genPop)
+
+#define the neural network's functions:
+
+class RNNclass:
+def init(self):
+
+    #-make 1D arrays of all the weights of just one individual:
+    self.Wxh = popWxhMatrix[range(input_size * hidden_size), individual]
+    self.Whh = popWhhMatrix[range(hidden_size * hidden_size), individual]
+    self.Why = popWhyMatrix[range(hidden_size * output_size), individual]
+    
+    #-make 2D matrixes of all of one layer's neurons' weights for each of the other layer's neurons:
+    self.WxhMatrix = np.matrix(self.Wxh).reshape(hidden_size, input_size)
+    self.WhhMatrix = np.matrix(self.Whh).reshape(hidden_size, hidden_size)
+    self.WhyMatrix = np.matrix(self.Why).reshape(output_size, hidden_size)
+           
+    #-set hidden state to 0:
+    self.hidden_state = np.zeros((hidden_size, 1))
+
+
+def forward(self, inputs):
+    
+    #-turn inputs array into a matrix:
+    inputs = np.array(inputs).reshape(input_size, 1)
+    
+    #-input + recurrent --> hidden:
+    self.hidden_state = np.tanh(np.dot(self.WxhMatrix, inputs) + np.dot(self.WhhMatrix, self.hidden_state))
+    
+    #-hidden --> output:
+    output = np.dot(self.WhyMatrix, self.hidden_state)
+    
+    return output
+#-initialize the RNN with individual 0:
+RNN = RNNclass()
+
+#-run & evolve the RNN and GA for each individual in each population:
+while robot.step(timestep) != -1:
+
+#-for each individual in a generation's population:
+if individual < genPop:
+    
+    #-for each simulation step in an individual's lifespan:
+    if stepCount < 2:
+        stepCount += 1
+    elif stepCount < (simEvaluationSteps - pauseSteps):
+        
+        #-update the inputs with new distance sensor values:
+        for i in range(len(ds)):
+            inputs[i] = ds[i].getValue()
+       
+       
+        #-run the RNN with the updated inputs:
+        motor_outputs = RNN.forward(inputs)
+        
+        
+        #-use the RNN's outputs as inputs for motors:
+        wheels[0].setVelocity((motor_outputs[0, 0]) * speedMultiplier)
+        wheels[1].setVelocity((motor_outputs[1, 0]) * speedMultiplier)
+        
+        
+        #-add the motors' outputs to the total distance traveled:
+        distanceTraveled += float(motor_outputs[0, 0]) + float(motor_outputs[1, 0])
+        
+        #-gain fittness for exploring:
+        if stepCount % 40 == 0:
+            endCoords = np.array(Jetson_Bot_Translation.getSFVec3f())
+            explorationValue += sum(np.abs(endCoords - spawnCoords))
+            spawnCoords = np.array(Jetson_Bot_Translation.getSFVec3f())
+        
+        #-if the individual reverses, "kill" the individual -Thank you Josh Bongard!!!!!
+        if (float(motor_outputs[0, 0]) + float(motor_outputs[1, 0])) < 0:
+            stepCount = simEvaluationSteps - pauseSteps
+            deaths += 1
+            distanceTraveled = 0
+        
+        if (inputs[3] < 0.2) or (inputs[4] < 0.2):
+            stepCount = simEvaluationSteps - pauseSteps
+            deaths += 1
+            distanceTraveled = 0
+        
+            
+        #-move to the individual's next simulation step:
+        stepCount += 1
+        
+    elif stepCount < simEvaluationSteps: #-for the last [amount] of simulation steps, stop moving
+        
+        stepCount += 1
+        wheels[0].setVelocity(0)
+        wheels[1].setVelocity(0)
+        
+    else: #-moving on to the next individual
+        
+        
+        #-fitness function:
+        labledPopFitness[individual, 1] = distanceTraveled * explorationValue
+        distanceTraveled = 0 #-reset distance tally
+        explorationValue = 0 #-reset exploration tally
+        
+        #-reorient and reposition the location and rotation of the Jetson_Bot for the next individual:
+        Jetson_Bot_Translation.setSFVec3f([np.random.uniform(-1, -6), np.random.uniform(-5.5, -7.5), 0.04])
+        Jetson_Bot_Rotation.setSFRotation([0, 0, 1, np.random.uniform(0, 6.283)])
+        BJTranslation.setSFVec3f([0, 0.09, -0.023])
+        Wheel1Translation.setSFVec3f([0.11, -0.1, 0])
+        Wheel2Translation.setSFVec3f([-0.11, -0.1, 0])
+        Wheel1Rotation.setSFRotation([0, -1, 0, 1.5708])
+        Wheel2Rotation.setSFRotation([0, -1, 0, 1.5708])
+        
+        #-initialize the RNN for the new individual (use dif. set of weights, etc.):
+        RNN = RNNclass()
+        
+        #-move to the next individual:
+        individual += 1
+        
+        #-reset the simulation step for the next individual:
+        stepCount = 0
+        
+        
+else: #-moving on to the next generation
+    
+    #-partition from the previous generation's data:
+    print(f"-----------------------------------------------------------------    Gen {generation}:")
+    
+    #-set the fittest and secondFittest variables as the highest and second highest fitness values and print:
+    orderedPopFitness = labledPopFitness[labledPopFitness[:, 1].argsort()]
+    
+    print(f"Highest fitness value: {orderedPopFitness[-1, 1]} | Second highest fitness value: {orderedPopFitness[-2, 1]}")
+    
+    #-find the generation's average fitness value and death count and print then reset death count:
+    genAverageFitness = 0
+    for n in range(genPop):
+        genAverageFitness += labledPopFitness[n, 1]
+    print(f"This generation's average fitness: {genAverageFitness/genPop}")
+    print(f"This generation's death count: {deaths}")
+    deaths = 0
+    
+    
+    #-crossover and mutation using the two most fit individuals:
+    
+    if orderedPopFitness[-1, 1] != 0:
+        
+        newPopWxhMatrix = np.zeros((input_size * hidden_size, genPop))
+        newPopWhhMatrix = np.zeros((hidden_size * hidden_size, genPop))
+        newPopWhyMatrix = np.zeros((hidden_size * output_size, genPop))
+        
+        for g in range(genPop):
+            
+            splitPoints = [0]
+            for breeder in range(breeders - 1):
+                splitPoints.append(random.uniform(breeder * 1/(breeders - 1), (breeder + 1) * 1/(breeders - 1)))
+            splitPoints.append(1)
+            
+            splitRatio = []
+            for split in range(breeders):
+                splitRatio.append(splitPoints[split + 1] - splitPoints[split])
+            
+            
+            for n in range(input_size * hidden_size):
+                for breeder in range(breeders):
+                    newPopWxhMatrix[n, g] += (popWxhMatrix[n, int(orderedPopFitness[-(breeder + 1), 0])] * splitRatio[breeder])
+                    #-mutate:
+                    newPopWxhMatrix[n, g] += random.uniform(-geneticVariation, geneticVariation)
+            
+            for n in range(hidden_size * hidden_size):
+                for breeder in range(breeders):
+                    newPopWhhMatrix[n, g] += (popWhhMatrix[n, int(orderedPopFitness[-(breeder + 1), 0])] * splitRatio[breeder])
+                    #-mutate:
+                    newPopWhhMatrix[n, g] += random.uniform(-geneticVariation, geneticVariation)
+            
+            for n in range(hidden_size * output_size):
+                for breeder in range(breeders):
+                    newPopWhyMatrix[n, g] += (popWhyMatrix[n, int(orderedPopFitness[-(breeder + 1), 0])] * splitRatio[breeder])
+                    #-mutate:
+                    newPopWhyMatrix[n, g] += random.uniform(-geneticVariation, geneticVariation)
+        
+        popWxhMatrix = newPopWxhMatrix
+        popWhhMatrix = newPopWhhMatrix
+        popWhyMatrix = newPopWhyMatrix
+        
+        #-shorten the genotypes in accordance to genPop (rather than to the first gen's larger population)
+        if generation == 1:
+            del popWxh
+            del popWhh
+            del popWhy
+        
+        #-move on to the next generation & increase the individuals' number of simulation steps and increase the robot's speed:
+        generation += 1
+        individual = 0
+        simEvaluationSteps += 0.1
+        speedMultiplier += 0.05
+        
+        if speedMultiplier > 10:
+            speedMultiplier = 10
+        
+    else:
+        
+        individual = 0
