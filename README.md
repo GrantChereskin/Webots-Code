@@ -1,0 +1,1 @@
+The Working_EA&Controller is the code that functions properly in Webots, while the Experimental_EA&Controller_Code includes additional code and modifications to Working_EA&Controller that I've experimented with, such as simulations with Nengo, that don't all meaningfully contribute to the functioning of the EA and robot controller in Webots.
